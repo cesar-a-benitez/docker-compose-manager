@@ -1,0 +1,103 @@
+#!/usr/bin/python
+
+import os
+import subprocess
+import yaml
+import argparse
+
+from manager_lib.spinner import *
+from manager_lib.logger import logger
+
+services = {}
+
+parser = argparse.ArgumentParser(description = 'Docker Compose Manager Application')
+parser.add_argument('-d', '--deploy', dest='deploy', action='store_true', help='Deploy all Docker Compose')
+parser.add_argument('-u', '--update', dest='update', nargs='+', help='Update Docker Compose (one or more modules)')
+parser.add_argument('-l', '--list', dest='list', action='store_true', help='List of Docker Compose Modules')
+parser.add_argument('-i', '--info', dest='info', action='store_true', help='Info about Docker Compose Modules')
+parser.add_argument('-ns', '--no-spinner', dest='spinner_enabled', action='store_false', help='Disable Spinner', default=True)
+
+args = parser.parse_args()
+
+def get_docker_tags():
+    logger.info('Getting Docker Compose Info...')
+
+    try:
+        file = list(filter(lambda file_name: file_name.startswith('docker-compose') and (file_name.endswith('.yml') or file_name.endswith('.yaml')),
+                    list(str(subprocess.check_output(['ls']))[2:-1].split('\\n'))))[0]
+    except IndexError:
+        logger.error('No Docker Compose file found')
+        exit(1)
+
+    with open(file, 'r') as stream:
+        try:
+            compose_file = yaml.safe_load(stream)
+            for service in compose_file['services'].keys():
+                srv = compose_file['services'][service]
+
+                services[service] = {'container_name': srv['container_name']}
+
+                if 'image' in srv:
+                    services[service]['image'] = srv['image']
+                else:
+                    services[service]['build'] = True
+
+        except yaml.YAMLError as exc:
+            print(exc)
+
+def update_module(module_name):
+    if module_name in services.keys():
+        if 'image' in services[module_name]:
+            logger.info(f'Pulling new image for {module_name} from {services[module_name]["image"]}')
+            os.system(f'docker pull {services[module_name]["image"]}')
+            os.system(f'docker-compose up -d --build {module_name}')
+            logger.info(f'Cleaning unused images for {module_name}')
+            clear_untaged_image(module_name)
+        else:
+            logger.info(f'Building new image for {module_name}')
+            os.system(f'docker-compose up -d --build {module_name}')
+            
+            
+    else:
+        print(f'Service \'{module_name}\' not found')
+        
+def clear_untaged_image(module_name):
+    images = subprocess.Popen(['docker', 'image', 'ls'], stdout=subprocess.PIPE).communicate()[0]
+    images = images.decode('utf-8').split('\n')
+    images = filter(lambda img: module_name in img and '<none>' in img, images)
+    for img in images:
+        img_name, img_id = [column for column in img.split(' ') if len(column) > 0][:3:2]
+        logger.info(f'Removing image \'{img_name}\' with id: {img_id}')
+        os.system(f'docker image rm {img_id}')
+    
+
+def update_all():
+    for service in services.keys():
+        update_module(service)
+
+get_docker_tags()
+
+if args.deploy:
+    with Spinner(enabled=args.spinner_enabled):
+        logger.info(f'Deploying all Docker Compose Modules')
+        os.system('docker-compose up -d --build')
+
+elif args.update:
+    args.update = [module.replace(',', '') for module in args.update]
+    
+    with Spinner(enabled=args.spinner_enabled):
+        if 'all' in args.update:
+            logger.info('Updating all Docker Compose Modules')
+            update_all()
+        else:
+            for module in args.update:
+                update_module(module)
+
+elif args.list:
+    logger.info(f'Modules found: {", ".join(services.keys())}')
+elif args.info:
+    for service in services.keys():
+        if 'ignore' in services[service] and services[service]['ignore']:
+            logger.warn(f'Module {service} disabled cause it was not found in docker compose file')
+        else:
+            logger.info(f'Module {service}: {services[service]}')
